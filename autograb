@@ -1,133 +1,130 @@
-local Players = game:GetService("Players")
+_G.InstaPickup = true
 
-local RunService = game:GetService("RunService")
+task.spawn(function()
+    local Players      = game:GetService("Players")
+    local RunService   = game:GetService("RunService")
+    local LocalPlayer  = Players.LocalPlayer
 
-local player = Players.LocalPlayer
-
-local autoGrabConnection = nil
-
-local pickupRadius = 15
-
-local cooldownTime = 0.5
-
-local onCooldown = false
-
-local function tryPickup()
-
-    if onCooldown then return end
-
-    
-
-    local char = player.Character
-
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-
-    if not root then return end
-
-    
-
-    local closestPrompt
-
-    local closestDist = pickupRadius
-
-    
-
-    for _, prompt in ipairs(workspace:GetDescendants()) do
-
-        if prompt:IsA("ProximityPrompt") and prompt.Enabled then
-
-            
-
-            -- ❌ IGNORA PROMPTS DE VENDA
-
-            local action = (prompt.ActionText or ""):lower()
-
-            local object = (prompt.ObjectText or ""):lower()
-
-            local parentName = prompt.Parent and prompt.Parent.Name:lower() or ""
-
-            
-
-            if action:find("sell") or object:find("sell") or parentName:find("sell") then
-
-                continue
-
-            end
-
-            
-
-            local part = prompt:FindFirstAncestorWhichIsA("BasePart")
-
-            if part then
-
-                local dist = (part.Position - root.Position).Magnitude
-
-                if dist <= closestDist then
-
-                    closestDist = dist
-
-                    closestPrompt = prompt
-
-                end
-
-            end
-
-        end
-
+    -- Helper to get current character (waits if not loaded)
+    local function getCharacter()
+        return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
     end
 
-    
+    -- Helper to get HRP reliably
+    local function getHRP()
+        local char = getCharacter()
+        return char:WaitForChild("HumanoidRootPart", 5)
+    end
 
-    if not closestPrompt then return end
+    local HRP      = getHRP()
+    local Humanoid = getCharacter():WaitForChild("Humanoid")
 
-    
-
-    fireproximityprompt(closestPrompt, closestPrompt.HoldDuration)
-
-    
-
-    onCooldown = true
-
-    task.delay(cooldownTime, function()
-
-        onCooldown = false
-
+    -- Update references on respawn
+    LocalPlayer.CharacterAdded:Connect(function(newChar)
+        HRP      = newChar:WaitForChild("HumanoidRootPart", 5)
+        Humanoid = newChar:WaitForChild("Humanoid")
     end)
 
-end
+    -- Try to get world position of any ProximityPrompt parent
+    local function getPromptPosition(prompt)
+        local parent = prompt.Parent
 
-local function toggleAutoGrab(state)
+        if parent:IsA("BasePart") then
+            return parent.Position
+        end
 
-    if autoGrabConnection then 
+        if parent:IsA("Model") then
+            local primary = parent.PrimaryPart or parent:FindFirstChildWhichIsA("BasePart")
+            if primary then
+                return primary.Position
+            end
+        end
 
-        autoGrabConnection:Disconnect() 
+        if parent:IsA("Attachment") then
+            return parent.WorldPosition
+        end
 
-        autoGrabConnection = nil 
-
+        -- Fallback: try to find any BasePart in parent
+        local part = parent:FindFirstChildWhichIsA("BasePart", true)
+        return part and part.Position or nil
     end
 
-    
+    -- Find the closest enabled "Steal" prompt in workspace.Plots
+    local function findNearestStealPrompt()
+        local nearest = nil
+        local minDist = math.huge
 
-    if state then
+        local plotsFolder = workspace:FindFirstChild("Plots")
+        if not plotsFolder then
+            return nil, math.huge
+        end
 
-        autoGrabConnection = RunService.Heartbeat:Connect(function()
+        for _, descendant in pairs(plotsFolder:GetDescendants()) do
+            if descendant:IsA("ProximityPrompt") 
+               and descendant.Enabled 
+               and descendant.ActionText == "Steal" then
+                
+                local pos = getPromptPosition(descendant)
+                if pos then
+                    local distance = (HRP.Position - pos).Magnitude
+                    if distance <= descendant.MaxActivationDistance and distance < minDist then
+                        minDist = distance
+                        nearest  = descendant
+                    end
+                end
+            end
+        end
 
-            tryPickup()
+        return nearest, minDist
+    end
 
+    -- Force-trigger the proximity prompt (most reliable method combo)
+    local function triggerPrompt(prompt)
+        if not prompt or not prompt:IsDescendantOf(workspace) then return end
+
+        -- Method 1: fireproximityprompt (works in most exploits)
+        pcall(function()
+            fireproximityprompt(prompt, 1000, math.huge)
         end)
 
-        print("✅ Auto Grab ON")
-
-    else
-
-        print("❌ Auto Grab OFF")
-
+        -- Method 2: simulate hold begin/end (fallback)
+        pcall(function()
+            prompt:InputHoldBegin()
+            task.wait(0.03)
+            prompt:InputHoldEnd()
+        end)
     end
 
-end
+    -- Main loop variables
+    local currentPrompt   = nil
+    local currentDistance = math.huge
+    local lastScan        = 0
 
--- Teste: Ativar Auto Grab
+    -- Scan for nearest prompt every ~50 ms
+    RunService.Heartbeat:Connect(function()
+        local now = tick()
+        if now - lastScan >= 0.05 then
+            currentPrompt, currentDistance = findNearestStealPrompt()
+            lastScan = now
+        end
+    end)
 
-toggleAutoGrab(true)
+    -- Main auto-steal loop
+    while true do
+        task.wait(0.08)  -- prevent freezing the thread
 
--- Para desativar: toggleAutoGrab(false)
+        if not _G.InstaPickup then
+            continue
+        end
+
+        -- Only run when walkspeed is boosted (likely in combat/farm mode)
+        if Humanoid.WalkSpeed <= 25 then
+            continue
+        end
+
+        if currentPrompt and currentDistance <= currentPrompt.MaxActivationDistance then
+            triggerPrompt(currentPrompt)
+            task.wait(1.30)  -- delay between steals (adjust based on game cooldown)
+        end
+    end
+end)
